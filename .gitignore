@@ -7,3 +7,5 @@ build/
 *.xcodeproj
 xcuserdata/
 screenshot-ui.png
+*.dmg
+dist/

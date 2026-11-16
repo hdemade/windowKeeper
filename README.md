@@ -12,6 +12,14 @@ bash build.sh install
 
 L'app est compilée hors d'iCloud Drive (`~/Library/Caches/WindowKeeper-build`), installée dans `~/Applications` puis lancée. Au premier lancement, accordez-lui l'autorisation dans Réglages Système > Confidentialité et sécurité > Accessibilité.
 
+## Image disque (DMG)
+
+```
+bash make-dmg.sh
+```
+
+Crée `WindowKeeper-<version>.dmg` dans le dossier de build. L'app n'est pas certifiée par Apple : sur un autre Mac, au premier lancement, il faut l'autoriser dans Réglages Système > Confidentialité et sécurité > « Ouvrir quand même ».
+
 ## Fonctionnement
 
 - Chaque combinaison d'écrans (portable seul, portable + écrans du bureau, etc.) a sa propre disposition.
