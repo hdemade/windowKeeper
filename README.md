@@ -24,6 +24,7 @@ Crée `WindowKeeper-<version>.dmg` dans le dossier de build. L'app n'est pas cer
 
 - Chaque combinaison d'écrans (portable seul, portable + écrans du bureau, etc.) a sa propre disposition.
 - La disposition est sauvegardée toutes les 30 secondes, donc la dernière sauvegarde avant un débranchement est celle qui sera restaurée au retour sur cette configuration.
+- En plus de ce dernier état automatique, on peut garder plusieurs sauvegardes nommées par configuration (« Nouvelle sauvegarde… ») et les restaurer à la demande depuis la fenêtre ou le menu. Dans la fenêtre, chaque configuration se déplie pour les montrer, et un clic droit permet de renommer ou de supprimer.
 - Quand les écrans changent, ou au réveil, l'app attend quelques secondes que macOS se stabilise puis restaure la disposition de la configuration courante.
 - Les données sont dans `~/Library/Application Support/WindowKeeper/layouts.json`, le journal dans `~/Library/Logs/WindowKeeper.log`.
 

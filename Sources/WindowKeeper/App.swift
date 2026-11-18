@@ -138,6 +138,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         add("Sauvegarder la disposition maintenant", #selector(saveNow), enabled: trusted)
         add("Restaurer la disposition", #selector(restoreNow), enabled: trusted && store.layout(for: currentKey) != nil)
+        let snapshots = store.snapshots(for: currentKey)
+        if !snapshots.isEmpty {
+            let parent = NSMenuItem(title: "Restaurer une sauvegarde", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for snapshot in snapshots {
+                let item = NSMenuItem(title: snapshot.snapshotLabel, action: #selector(restoreSnapshotFromMenu(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = snapshot.snapshotID
+                item.isEnabled = trusted
+                sub.addItem(item)
+            }
+            sub.autoenablesItems = false
+            parent.submenu = sub
+            parent.isEnabled = trusted
+            menu.addItem(parent)
+        }
         menu.addItem(.separator())
         add("Sauvegarde automatique (toutes les 30 s)", #selector(toggleAutoSave), state: autoSave)
         add("Restauration automatique au changement d'écrans", #selector(toggleAutoRestore), state: autoRestore)
@@ -153,6 +169,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func restoreSnapshotFromMenu(_ sender: NSMenuItem) {
+        guard !busy, let id = sender.representedObject as? String,
+              let layout = store.snapshot(key: currentKey, id: id) else { return }
+        runRestore(layout, passes: 1) { [self] in showReport() }
     }
 
     @objc private func toggleAutoSave() { autoSave.toggle() }
@@ -192,6 +214,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         revision += 1
     }
 
+    func renameSnapshot(key: String, id: String, to name: String) {
+        store.renameSnapshot(key: key, id: id, to: name)
+        revision += 1
+    }
+
+    func deleteSnapshot(key: String, id: String) {
+        store.removeSnapshot(key: key, id: id)
+        revision += 1
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func alert(_ title: String, _ text: String) {
@@ -215,6 +247,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func saveNow() { save(manual: true) }
+
+    /// Ajoute une sauvegarde nommée de la disposition actuelle ; `completion` reçoit son identifiant.
+    func saveSnapshot(name: String, completion: @escaping (String?) -> Void = { _ in }) {
+        guard !busy else { completion(nil); return }
+        busy = true
+        revision += 1
+        worker.async { [self] in
+            let layout = Snapshot.capture(scanner: scanner)
+            DispatchQueue.main.async { [self] in
+                busy = false
+                defer { revision += 1 }
+                guard let layout = layout, layout.configKey == Displays.configKey() else { completion(nil); return }
+                currentKey = layout.configKey
+                let id = store.addSnapshot(layout, name: name)
+                lastSave = layout.savedAt
+                wkLog("Nouvelle sauvegarde : \(layout.windows.count) fenêtres")
+                completion(id)
+            }
+        }
+    }
 
     private func save(manual: Bool) {
         guard !busy else { return }
@@ -245,6 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func restoreCurrent(completion: @escaping () -> Void = {}) {
         guard !busy, let layout = store.layout(for: currentKey) else { return }
         runRestore(layout, passes: 1, completion: completion)
+    }
+
+    /// Restaure une disposition précise (le dernier état ou une sauvegarde) des écrans branchés.
+    func restore(_ layout: Layout) {
+        guard !busy, layout.configKey == currentKey else { return }
+        runRestore(layout, passes: 1) {}
     }
 
     private func runRestore(_ layout: Layout, passes: Int, completion: @escaping () -> Void) {

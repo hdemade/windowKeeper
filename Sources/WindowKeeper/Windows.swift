@@ -116,10 +116,21 @@ struct Layout: Codable {
     var windows: [WindowRecord]
     var displays: [DisplayRecord]?   // absent des sauvegardes de la première version
     var name: String?                // nom choisi par l'utilisateur, absent par défaut
+    var snapshotID: String?          // présent seulement sur les sauvegardes nommées
 
     var title: String {
         if let name = name, !name.isEmpty { return name }
         return defaultTitle
+    }
+
+    /// Nom d'une sauvegarde : celui choisi, sinon sa date.
+    var snapshotLabel: String {
+        if let name = name, !name.isEmpty { return name }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "fr_FR")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Sauvegarde du \(formatter.string(from: savedAt))"
     }
 
     /// Nom déduit des écrans, utilisé tant que l'utilisateur n'en a pas choisi un.
@@ -186,6 +197,8 @@ final class LayoutStore {
     private struct File: Codable {
         var layouts: [String: Layout] = [:]
         var previous: [String: Layout] = [:]
+        /// Sauvegardes gardées en plus du dernier état, par ensemble d'écrans (absent des anciens fichiers).
+        var snapshots: [String: [Layout]]?
     }
 
     private var file = File()
@@ -221,8 +234,7 @@ final class LayoutStore {
     /// Un nom vide rétablit le nom déduit des écrans.
     func rename(key: String, to name: String) {
         guard file.layouts[key] != nil else { return }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = trimmed.isEmpty ? nil : trimmed
+        let value = Self.clean(name)
         file.layouts[key]?.name = value
         file.previous[key]?.name = value
         persist()
@@ -241,10 +253,54 @@ final class LayoutStore {
 
     var all: [Layout] { file.layouts.values.sorted { $0.savedAt > $1.savedAt } }
 
+    /// Supprime l'ensemble d'écrans : son dernier état et toutes ses sauvegardes.
     func remove(key: String) {
         file.layouts[key] = nil
         file.previous[key] = nil
+        file.snapshots?[key] = nil
         persist()
+    }
+
+    // MARK: Sauvegardes nommées
+
+    /// Les plus récentes d'abord.
+    func snapshots(for key: String) -> [Layout] {
+        (file.snapshots?[key] ?? []).sorted { $0.savedAt > $1.savedAt }
+    }
+
+    func snapshot(key: String, id: String) -> Layout? {
+        file.snapshots?[key]?.first { $0.snapshotID == id }
+    }
+
+    /// Garde une copie de la disposition ; elle devient aussi le dernier état de ces écrans.
+    @discardableResult
+    func addSnapshot(_ layout: Layout, name: String) -> String {
+        save(layout)
+        var copy = layout
+        let id = UUID().uuidString
+        copy.snapshotID = id
+        copy.name = Self.clean(name)
+        file.snapshots = file.snapshots ?? [:]
+        file.snapshots?[layout.configKey, default: []].append(copy)
+        persist()
+        return id
+    }
+
+    func renameSnapshot(key: String, id: String, to name: String) {
+        guard let index = file.snapshots?[key]?.firstIndex(where: { $0.snapshotID == id }) else { return }
+        file.snapshots?[key]?[index].name = Self.clean(name)
+        persist()
+    }
+
+    func removeSnapshot(key: String, id: String) {
+        file.snapshots?[key]?.removeAll { $0.snapshotID == id }
+        if file.snapshots?[key]?.isEmpty == true { file.snapshots?[key] = nil }
+        persist()
+    }
+
+    private static func clean(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     func removeAll() {
