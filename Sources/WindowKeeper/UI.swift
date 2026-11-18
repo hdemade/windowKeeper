@@ -5,7 +5,7 @@ import Cocoa
 
 /// Ce que vise un renommage, une suppression ou la sélection : un ensemble d'écrans (son dernier état)
 /// ou l'une de ses sauvegardes.
-struct ConfigTarget: Equatable {
+struct ConfigTarget: Hashable {
     var key: String
     var snapshotID: String?
 }
@@ -17,8 +17,7 @@ struct MainView: View {
     @State private var selectedSpace = 1
     @State private var pendingDelete: ConfigTarget?
     @State private var renaming: ConfigTarget?
-    @State private var creatingSnapshot = false
-    @State private var newName = ""
+    @State private var renamingInDetail = false
 
     private var layouts: [Layout] {
         // La configuration actuelle d'abord, puis les plus récentes.
@@ -71,53 +70,33 @@ struct MainView: View {
         } message: { target in
             Text(deleteMessage(target))
         }
-        .sheet(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-            NameSheet(title: renaming?.snapshotID == nil ? "Renommer la configuration" : "Renommer la sauvegarde",
-                      action: "Renommer",
-                      name: $newName,
-                      placeholder: renamePlaceholder,
-                      hint: renaming?.snapshotID == nil
-                        ? "Laissez vide pour reprendre le nom des écrans : \(renamePlaceholder)"
-                        : "Laissez vide pour la nommer d'après sa date.",
-                      onCancel: { renaming = nil },
-                      onCommit: {
-                          if let target = renaming {
-                              if let id = target.snapshotID {
-                                  model.renameSnapshot(key: target.key, id: id, to: newName)
-                              } else {
-                                  model.rename(key: target.key, to: newName)
-                              }
-                          }
-                          renaming = nil
-                      })
-        }
-        .sheet(isPresented: $creatingSnapshot) {
-            NameSheet(title: "Nouvelle sauvegarde",
-                      action: "Sauvegarder",
-                      name: $newName,
-                      placeholder: "Ex. : Réunion, Développement…",
-                      hint: "Garde la disposition actuelle en plus du dernier état enregistré automatiquement. Sans nom, elle est nommée d'après sa date.",
-                      onCancel: { creatingSnapshot = false },
-                      onCommit: {
-                          creatingSnapshot = false
-                          let key = model.currentKey
-                          model.saveSnapshot(name: newName) { id in
-                              guard let id = id else { return }
-                              expanded.insert(key)
-                              selection = ConfigTarget(key: key, snapshotID: id)
-                          }
-                      })
-        }
     }
 
-    private var renamePlaceholder: String {
-        guard let target = renaming, let layout = layout(for: target) else { return "" }
-        if target.snapshotID != nil {
-            var unnamed = layout
-            unnamed.name = nil
-            return unnamed.snapshotLabel
-        }
-        return layout.defaultTitle
+    /// Le nom affiché quand l'utilisateur n'en a pas choisi.
+    private func defaultLabel(for target: ConfigTarget) -> String {
+        guard var layout = layout(for: target) else { return "" }
+        layout.name = nil
+        return target.snapshotID == nil ? layout.defaultTitle : layout.snapshotLabel
+    }
+
+    /// Champ d'édition du nom, affiché à la place du titre pendant un renommage.
+    private func nameField(for target: ConfigTarget, inDetail: Bool) -> InlineNameField? {
+        guard renaming == target, renamingInDetail == inDetail else { return nil }
+        let fallback = defaultLabel(for: target)
+        return InlineNameField(initial: layout(for: target)?.name ?? fallback,
+                               placeholder: fallback,
+                               font: inDetail ? .title2.weight(.semibold) : .body.weight(.medium),
+                               onCommit: { text in
+                                   let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                   let name = trimmed == fallback ? "" : trimmed
+                                   if let id = target.snapshotID {
+                                       model.renameSnapshot(key: target.key, id: id, to: name)
+                                   } else {
+                                       model.rename(key: target.key, to: name)
+                                   }
+                                   if renaming == target { renaming = nil }
+                               },
+                               onCancel: { if renaming == target { renaming = nil } })
     }
 
     private func deleteMessage(_ target: ConfigTarget) -> String {
@@ -127,14 +106,22 @@ struct MainView: View {
         return "Le dernier état enregistré pour ces écrans\(extra) sera effacé. Cette action est irréversible."
     }
 
-    private func startRename(_ target: ConfigTarget) {
-        newName = layout(for: target)?.name ?? ""
+    private func startRename(_ target: ConfigTarget, inDetail: Bool = false) {
+        if !inDetail { expanded.insert(target.key) }
+        selection = target
+        renamingInDetail = inDetail
         renaming = target
     }
 
+    /// Sauvegarde tout de suite, puis ouvre le nom de la nouvelle sauvegarde à l'édition.
     private func startSnapshot() {
-        newName = ""
-        creatingSnapshot = true
+        let key = model.currentKey
+        model.saveSnapshot(name: "") { id in
+            guard let id = id else { return }
+            let target = ConfigTarget(key: key, snapshotID: id)
+            withAnimation(.easeInOut(duration: 0.15)) { _ = expanded.insert(key) }
+            startRename(target)
+        }
     }
 
     private func select(_ target: ConfigTarget) {
@@ -145,7 +132,7 @@ struct MainView: View {
     @ViewBuilder
     private func actions(for target: ConfigTarget) -> some View {
         if target.snapshotID == nil && target.key == model.currentKey {
-            Button { startSnapshot() } label: { Label("Nouvelle sauvegarde…", systemImage: "plus") }
+            Button { startSnapshot() } label: { Label("Nouvelle sauvegarde", systemImage: "plus") }
                 .disabled(!model.trusted || model.busy)
         }
         if let layout = layout(for: target), target.key == model.currentKey {
@@ -153,7 +140,7 @@ struct MainView: View {
                 .disabled(!model.trusted || model.busy)
             Divider()
         }
-        Button { startRename(target) } label: { Label("Renommer…", systemImage: "pencil") }
+        Button { startRename(target) } label: { Label("Renommer", systemImage: "pencil") }
         Divider()
         Button(role: .destructive) { pendingDelete = target } label: {
             Label(target.snapshotID == nil ? "Supprimer la configuration…" : "Supprimer…", systemImage: "trash")
@@ -231,6 +218,7 @@ struct MainView: View {
         let selected = current
 
         ConfigRow(layout: layout,
+                  nameField: nameField(for: groupTarget, inDetail: false),
                   snapshotCount: snapshots.count,
                   isCurrent: key == model.currentKey,
                   isSelected: selected?.key == key && !isOpen,
@@ -253,6 +241,7 @@ struct MainView: View {
             VStack(spacing: 2) {
                 SnapshotRow(icon: "clock.arrow.circlepath",
                             title: "Dernier état",
+                            nameField: nil,
                             subtitle: "Automatique · \(layout.windows.count) fenêtres · \(relative(layout.savedAt))",
                             isSelected: selected == groupTarget) {
                     actions(for: groupTarget)
@@ -265,6 +254,7 @@ struct MainView: View {
                     let target = ConfigTarget(key: key, snapshotID: snapshot.snapshotID)
                     SnapshotRow(icon: "bookmark",
                                 title: snapshot.snapshotLabel,
+                                nameField: nameField(for: target, inDetail: false),
                                 subtitle: "\(snapshot.windows.count) fenêtres · \(relative(snapshot.savedAt))",
                                 isSelected: selected == target) {
                         actions(for: target)
@@ -276,7 +266,7 @@ struct MainView: View {
 
                 if key == model.currentKey {
                     Button { startSnapshot() } label: {
-                        Label("Nouvelle sauvegarde…", systemImage: "plus.circle")
+                        Label("Nouvelle sauvegarde", systemImage: "plus.circle")
                             .font(.callout)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -306,9 +296,15 @@ struct MainView: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(isSnapshot ? layout.snapshotLabel : layout.title)
-                                .font(.title2.weight(.semibold)).lineLimit(1)
-                            Button { startRename(target) } label: { Image(systemName: "pencil") }
+                            if let field = nameField(for: target, inDetail: true) {
+                                field.frame(maxWidth: 420)
+                            } else {
+                                Text(isSnapshot ? layout.snapshotLabel : layout.title)
+                                    .font(.title2.weight(.semibold)).lineLimit(1)
+                                    .onTapGesture(count: 2) { startRename(target, inDetail: true) }
+                                    .help("Double-cliquez pour renommer")
+                            }
+                            Button { startRename(target, inDetail: true) } label: { Image(systemName: "pencil") }
                                 .buttonStyle(.borderless)
                                 .help(isSnapshot ? "Renommer cette sauvegarde" : "Renommer cette configuration")
                         }
@@ -339,7 +335,7 @@ struct MainView: View {
                     if isCurrent {
                         Button { model.restore(layout) } label: { Label("Restaurer", systemImage: "arrow.counterclockwise") }
                             .disabled(!model.trusted || model.busy)
-                        Button { startSnapshot() } label: { Label("Nouvelle sauvegarde…", systemImage: "plus") }
+                        Button { startSnapshot() } label: { Label("Nouvelle sauvegarde", systemImage: "plus") }
                             .disabled(!model.trusted || model.busy)
                         if !isSnapshot {
                             Button { model.saveNow() } label: { Label("Sauvegarder maintenant", systemImage: "square.and.arrow.down") }
@@ -380,6 +376,7 @@ struct MainView: View {
 
 private struct ConfigRow<Actions: View>: View {
     let layout: Layout
+    let nameField: InlineNameField?
     let snapshotCount: Int
     let isCurrent: Bool
     let isSelected: Bool
@@ -403,7 +400,11 @@ private struct ConfigRow<Actions: View>: View {
                 .frame(width: 28)
                 .foregroundColor(isSelected ? .white : .accentColor)
             VStack(alignment: .leading, spacing: 2) {
-                Text(layout.title).font(.body.weight(.medium)).lineLimit(2)
+                if let field = nameField {
+                    field
+                } else {
+                    Text(layout.title).font(.body.weight(.medium)).lineLimit(2)
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundColor(isSelected ? .white.opacity(0.85) : .secondary)
@@ -435,6 +436,7 @@ private struct ConfigRow<Actions: View>: View {
 private struct SnapshotRow<Actions: View>: View {
     let icon: String
     let title: String
+    let nameField: InlineNameField?
     let subtitle: String
     let isSelected: Bool
     @ViewBuilder let actions: () -> Actions
@@ -445,7 +447,11 @@ private struct SnapshotRow<Actions: View>: View {
                 .frame(width: 18)
                 .foregroundColor(isSelected ? .white : .secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.callout.weight(.medium)).lineLimit(1)
+                if let field = nameField {
+                    field
+                } else {
+                    Text(title).font(.callout.weight(.medium)).lineLimit(1)
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundColor(isSelected ? .white.opacity(0.85) : .secondary)
@@ -466,34 +472,42 @@ private struct SnapshotRow<Actions: View>: View {
     }
 }
 
-// MARK: - Saisie d'un nom
+// MARK: - Saisie d'un nom sur place
 
-private struct NameSheet: View {
-    let title: String
-    let action: String
-    @Binding var name: String
+/// Entrée valide, Échap annule, cliquer ailleurs valide aussi (comme dans le Finder).
+struct InlineNameField: View {
+    let initial: String
     let placeholder: String
-    let hint: String
+    let font: Font
+    let onCommit: (String) -> Void
     let onCancel: () -> Void
-    let onCommit: () -> Void
+
+    @State private var text = ""
+    @State private var finished = false
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.headline)
-            TextField(placeholder, text: $name)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(onCommit)
-            Text(hint)
-                .font(.caption).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("Annuler", action: onCancel).keyboardShortcut(.cancelAction)
-                Button(action, action: onCommit).keyboardShortcut(.defaultAction)
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .font(font)
+            .foregroundColor(.primary)
+            .focused($focused)
+            .onSubmit { finish(commit: true) }
+            .onExitCommand { finish(commit: false) }
+            .onChange(of: focused) { isFocused in
+                if !isFocused { finish(commit: true) }
             }
-        }
-        .padding(20)
-        .frame(width: 400)
+            .onAppear {
+                finished = false
+                text = initial
+                DispatchQueue.main.async { focused = true }
+            }
+    }
+
+    private func finish(commit: Bool) {
+        guard !finished else { return }
+        finished = true
+        if commit { onCommit(text) } else { onCancel() }
     }
 }
 
