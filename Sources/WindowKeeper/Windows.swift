@@ -115,8 +115,15 @@ struct Layout: Codable {
     var bootID: Int
     var windows: [WindowRecord]
     var displays: [DisplayRecord]?   // absent des sauvegardes de la première version
+    var name: String?                // nom choisi par l'utilisateur, absent par défaut
 
     var title: String {
+        if let name = name, !name.isEmpty { return name }
+        return defaultTitle
+    }
+
+    /// Nom déduit des écrans, utilisé tant que l'utilisateur n'en a pas choisi un.
+    var defaultTitle: String {
         guard let displays = displays, !displays.isEmpty else {
             return "\(displayCount) écran\(displayCount > 1 ? "s" : "")"
         }
@@ -201,8 +208,23 @@ final class LayoutStore {
     func layout(for key: String) -> Layout? { file.layouts[key] }
 
     func save(_ layout: Layout) {
-        if let old = file.layouts[layout.configKey] { file.previous[layout.configKey] = old }
+        var layout = layout
+        if let old = file.layouts[layout.configKey] {
+            file.previous[layout.configKey] = old
+            // Le nom choisi survit aux sauvegardes successives.
+            if layout.name == nil { layout.name = old.name }
+        }
         file.layouts[layout.configKey] = layout
+        persist()
+    }
+
+    /// Un nom vide rétablit le nom déduit des écrans.
+    func rename(key: String, to name: String) {
+        guard file.layouts[key] != nil else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed.isEmpty ? nil : trimmed
+        file.layouts[key]?.name = value
+        file.previous[key]?.name = value
         persist()
     }
 
@@ -210,7 +232,8 @@ final class LayoutStore {
     /// des fenêtres déjà déplacées par macOS : on revient à la précédente.
     func rollbackIfRecent(key: String, within seconds: TimeInterval) {
         guard let current = file.layouts[key], Date().timeIntervalSince(current.savedAt) < seconds,
-              let previous = file.previous[key] else { return }
+              var previous = file.previous[key] else { return }
+        previous.name = current.name
         file.layouts[key] = previous
         persist()
         wkLog("Sauvegarde trop récente écartée pour \(key)")

@@ -7,7 +7,9 @@ struct MainView: View {
     @ObservedObject var model: AppDelegate
     @State private var selectedKey: String?
     @State private var selectedSpace = 1
-    @State private var confirmDelete = false
+    @State private var pendingDelete: Layout?
+    @State private var renamingKey: String?
+    @State private var newName = ""
 
     private var layouts: [Layout] {
         // La configuration actuelle d'abord, puis les plus récentes.
@@ -32,6 +34,38 @@ struct MainView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 540)
+        .alert("Supprimer « \(pendingDelete?.title ?? "") » ?",
+               isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+               presenting: pendingDelete) { layout in
+            Button("Supprimer", role: .destructive) {
+                model.delete(key: layout.configKey)
+                if selectedKey == layout.configKey { selectedKey = nil }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: { _ in
+            Text("La disposition sauvegardée pour ces écrans sera effacée. Cette action est irréversible.")
+        }
+        .sheet(isPresented: Binding(get: { renamingKey != nil }, set: { if !$0 { renamingKey = nil } })) {
+            RenameSheet(name: $newName,
+                        placeholder: model.store.layout(for: renamingKey ?? "")?.defaultTitle ?? "",
+                        onCancel: { renamingKey = nil },
+                        onCommit: {
+                            if let key = renamingKey { model.rename(key: key, to: newName) }
+                            renamingKey = nil
+                        })
+        }
+    }
+
+    private func startRename(_ layout: Layout) {
+        newName = layout.name ?? ""
+        renamingKey = layout.configKey
+    }
+
+    @ViewBuilder
+    private func actions(for layout: Layout) -> some View {
+        Button { startRename(layout) } label: { Label("Renommer…", systemImage: "pencil") }
+        Divider()
+        Button(role: .destructive) { pendingDelete = layout } label: { Label("Supprimer…", systemImage: "trash") }
     }
 
     // MARK: Bandeau d'autorisation
@@ -70,9 +104,12 @@ struct MainView: View {
                         ForEach(layouts, id: \.configKey) { layout in
                             ConfigRow(layout: layout,
                                       isCurrent: layout.configKey == model.currentKey,
-                                      isSelected: layout.configKey == selected?.configKey)
-                                .contentShape(Rectangle())
-                                .onTapGesture { selectedKey = layout.configKey; selectedSpace = 1 }
+                                      isSelected: layout.configKey == selected?.configKey) {
+                                actions(for: layout)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedKey = layout.configKey; selectedSpace = 1 }
+                            .contextMenu { actions(for: layout) }
                         }
                     }
                     .padding(.horizontal, 10)
@@ -112,7 +149,12 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(layout.title).font(.title2.weight(.semibold)).lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(layout.title).font(.title2.weight(.semibold)).lineLimit(1)
+                            Button { startRename(layout) } label: { Image(systemName: "pencil") }
+                                .buttonStyle(.borderless)
+                                .help("Renommer cette configuration")
+                        }
                         Text("\(layout.windows.count) fenêtres · sauvegardée \(relative(layout.savedAt))")
                             .foregroundColor(.secondary)
                     }
@@ -135,7 +177,7 @@ struct MainView: View {
                     .frame(height: 150)
 
                 HStack {
-                    Button(role: .destructive) { confirmDelete = true } label: { Label("Supprimer", systemImage: "trash") }
+                    Button(role: .destructive) { pendingDelete = layout } label: { Label("Supprimer…", systemImage: "trash") }
                     Spacer()
                     if isCurrent {
                         Button { model.restoreCurrent() } label: { Label("Restaurer", systemImage: "arrow.counterclockwise") }
@@ -150,13 +192,6 @@ struct MainView: View {
                 }
             }
             .padding(20)
-            .confirmationDialog("Supprimer cette disposition ?", isPresented: $confirmDelete) {
-                Button("Supprimer", role: .destructive) {
-                    model.delete(key: layout.configKey)
-                    selectedKey = nil
-                }
-                Button("Annuler", role: .cancel) {}
-            }
         } else {
             VStack(spacing: 14) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
@@ -182,10 +217,11 @@ struct MainView: View {
 
 // MARK: - Ligne de configuration
 
-private struct ConfigRow: View {
+private struct ConfigRow<Actions: View>: View {
     let layout: Layout
     let isCurrent: Bool
     let isSelected: Bool
+    @ViewBuilder let actions: () -> Actions
 
     var body: some View {
         HStack(spacing: 10) {
@@ -203,10 +239,44 @@ private struct ConfigRow: View {
             if isCurrent {
                 Circle().fill(Color.green).frame(width: 8, height: 8)
             }
+            if isSelected {
+                Menu { actions() } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Renommer ou supprimer")
+            }
         }
         .padding(.vertical, 8).padding(.horizontal, 10)
         .foregroundColor(isSelected ? .white : .primary)
         .background(RoundedRectangle(cornerRadius: 8).fill(isSelected ? Color.accentColor : Color.clear))
+    }
+}
+
+// MARK: - Renommage
+
+private struct RenameSheet: View {
+    @Binding var name: String
+    let placeholder: String
+    let onCancel: () -> Void
+    let onCommit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Renommer la configuration").font(.headline)
+            TextField(placeholder, text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(onCommit)
+            Text("Laissez vide pour reprendre le nom des écrans : \(placeholder)")
+                .font(.caption).foregroundColor(.secondary)
+            HStack {
+                Spacer()
+                Button("Annuler", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Renommer", action: onCommit).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
     }
 }
 

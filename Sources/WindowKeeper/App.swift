@@ -124,8 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             menu.addItem(.separator())
         }
         let displayCount = Displays.active().count
-        add("Configuration actuelle : \(displayCount) écran\(displayCount > 1 ? "s" : "")", nil)
-        if let layout = store.layout(for: currentKey) {
+        let currentLayout = store.layout(for: currentKey)
+        add("Configuration actuelle : \(currentLayout?.name ?? "\(displayCount) écran\(displayCount > 1 ? "s" : "")")", nil)
+        if let layout = currentLayout {
             let formatter = DateFormatter()
             formatter.dateStyle = .short
             formatter.timeStyle = .medium
@@ -183,6 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func delete(key: String) {
         store.remove(key: key)
+        revision += 1
+    }
+
+    func rename(key: String, to name: String) {
+        store.rename(key: key, to: name)
         revision += 1
     }
 
