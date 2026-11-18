@@ -10,7 +10,7 @@ Petite app de barre de menus pour macOS (Apple Silicon, macOS 13 ou plus récent
 bash build.sh install
 ```
 
-L'app est compilée hors d'iCloud Drive (`~/Library/Caches/WindowKeeper-build`), installée dans `~/Applications` puis lancée. Au premier lancement, accordez-lui l'autorisation dans Réglages Système > Confidentialité et sécurité > Accessibilité.
+L'app est compilée hors d'iCloud Drive (`~/Library/Caches/WindowKeeper-build`), installée dans `/Applications` puis lancée (si le compte n'est pas administrateur, macOS demande le mot de passe d'un administrateur ; `DEST=~/Applications bash build.sh install` installe ailleurs). Une ancienne copie dans `~/Applications` est supprimée. Au premier lancement, accordez-lui l'autorisation dans Réglages Système > Confidentialité et sécurité > Accessibilité.
 
 ## Image disque (DMG)
 
@@ -33,8 +33,8 @@ Crée `WindowKeeper-<version>.dmg` dans le dossier de build. L'app n'est pas cer
 ## Diagnostic
 
 ```
-~/Applications/WindowKeeper.app/Contents/MacOS/WindowKeeper --diagnose
-~/Applications/WindowKeeper.app/Contents/MacOS/WindowKeeper --selftest
+/Applications/WindowKeeper.app/Contents/MacOS/WindowKeeper --diagnose
+/Applications/WindowKeeper.app/Contents/MacOS/WindowKeeper --selftest
 ```
 
 `--selftest` ouvre une petite fenêtre de test et vérifie quelle méthode de changement de bureau macOS accepte sur cette machine.

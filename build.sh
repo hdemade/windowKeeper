@@ -1,7 +1,7 @@
 #!/bin/bash
 # Compile WindowKeeper et fabrique WindowKeeper.app.
 #   ./build.sh            -> compile seulement
-#   ./build.sh install    -> compile, installe dans ~/Applications et lance l'app
+#   ./build.sh install    -> compile, installe dans /Applications et lance l'app
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -42,13 +42,25 @@ fi
 echo "App construite : $APP"
 
 if [ "${1:-}" = "install" ]; then
-    DEST="$HOME/Applications"
-    mkdir -p "$DEST"
+    DEST="${DEST:-/Applications}"
     pkill -x WindowKeeper 2>/dev/null || true
     sleep 0.5
-    rm -rf "$DEST/WindowKeeper.app"
-    cp -R "$APP" "$DEST/WindowKeeper.app"
-    touch "$DEST/WindowKeeper.app"
+    if [ -w "$DEST" ]; then
+        rm -rf "$DEST/WindowKeeper.app"
+        cp -R "$APP" "$DEST/WindowKeeper.app"
+    else
+        # Compte non administrateur : macOS demande le mot de passe d'un administrateur.
+        echo "Mot de passe administrateur nécessaire pour écrire dans $DEST"
+        osascript -e "do shell script \"rm -rf '$DEST/WindowKeeper.app' && cp -R '$APP' '$DEST/WindowKeeper.app'\" with administrator privileges"
+    fi
+    touch "$DEST/WindowKeeper.app" 2>/dev/null || true
     echo "App installée : $DEST/WindowKeeper.app"
+
+    # Les versions précédentes s'installaient dans ~/Applications : on retire cette ancienne copie.
+    OLD="$HOME/Applications/WindowKeeper.app"
+    if [ "$DEST/WindowKeeper.app" != "$OLD" ] && [ -d "$OLD" ]; then
+        rm -rf "$OLD"
+        echo "Ancienne copie supprimée : $OLD"
+    fi
     open "$DEST/WindowKeeper.app"
 fi
