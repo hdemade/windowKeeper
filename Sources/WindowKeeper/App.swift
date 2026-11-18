@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// Incrémenté à chaque changement d'état pour rafraîchir la fenêtre.
     @Published var revision = 0
     private var mainWindow: NSWindow?
+    private var settingsWindow: NSWindow?
+    let updater = UpdateChecker()
     private var refreshTimer: Timer?
     private var statusItem: NSStatusItem!
     let store = LayoutStore()
@@ -26,6 +28,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var autoSave: Bool {
         get { defaults.object(forKey: "autoSave") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "autoSave"); revision += 1 }
+    }
+    /// Intervalle entre deux sauvegardes automatiques, en secondes.
+    var autoSaveInterval: TimeInterval {
+        get {
+            let value = defaults.double(forKey: "autoSaveInterval")
+            return value >= 5 ? value : AutoSaveInterval.standard
+        }
+        set {
+            defaults.set(newValue, forKey: "autoSaveInterval")
+            scheduleAutoSave()
+            revision += 1
+        }
     }
     var autoRestore: Bool {
         get { defaults.object(forKey: "autoRestore") as? Bool ?? true }
@@ -57,7 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
 
-        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.autoSaveTick() }
+        scheduleAutoSave()
+        updater.onChange = { [weak self] in self?.revision += 1 }
+        updater.start()
         wkLog("Démarrage, configuration \(currentKey)")
 
         // Au tout premier lancement (rien de sauvegardé ou autorisation manquante), on montre la fenêtre.
@@ -98,9 +114,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         mainWindow?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
+                                  styleMask: [.titled, .closable],
+                                  backing: .buffered, defer: false)
+            window.title = "Réglages de WindowKeeper"
+            window.isReleasedWhenClosed = false
+            window.contentViewController = NSHostingController(rootView: SettingsView(model: self, updater: updater))
+            window.center()
+            window.setFrameAutosaveName("WindowKeeperSettings")
+            window.delegate = self
+            settingsWindow = window
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
     func windowWillClose(_ notification: Notification) {
-        guard (notification.object as? NSWindow) === mainWindow else { return }
-        NSApp.setActivationPolicy(.accessory)
+        guard let closing = notification.object as? NSWindow else { return }
+        let others = [mainWindow, settingsWindow].compactMap { $0 }.filter { $0 !== closing && $0.isVisible }
+        // L'icône quitte le Dock quand plus aucune fenêtre de l'app n'est ouverte.
+        if others.isEmpty { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    @objc private func downloadUpdate() {
+        if let release = updater.available { updater.download(release) }
     }
 
     // MARK: Menu
@@ -116,7 +156,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         menu.autoenablesItems = false
 
+        if let release = updater.available {
+            add("Mise à jour disponible : WindowKeeper \(release.version)…", #selector(downloadUpdate))
+            menu.addItem(.separator())
+        }
         add("Ouvrir WindowKeeper…", #selector(showMainWindow))
+        let settings = NSMenuItem(title: "Réglages…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         menu.addItem(.separator())
         if !trusted {
             add("⚠️ Autorisation Accessibilité manquante", nil)
@@ -155,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             menu.addItem(parent)
         }
         menu.addItem(.separator())
-        add("Sauvegarde automatique (toutes les 30 s)", #selector(toggleAutoSave), state: autoSave)
+        add("Sauvegarde automatique (toutes les \(AutoSaveInterval.label(autoSaveInterval)))", #selector(toggleAutoSave), state: autoSave)
         add("Restauration automatique au changement d'écrans", #selector(toggleAutoRestore), state: autoRestore)
         add("Lancer à l'ouverture de session", #selector(toggleLoginItem), state: SMAppService.mainApp.status == .enabled)
         menu.addItem(.separator())
@@ -239,6 +286,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var screenLocked: Bool {
         guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (dict["CGSSessionScreenIsLocked"] as? Bool) ?? false
+    }
+
+    private func scheduleAutoSave() {
+        autoSaveTimer?.invalidate()
+        let timer = Timer(timeInterval: autoSaveInterval, repeats: true) { [weak self] _ in self?.autoSaveTick() }
+        timer.tolerance = min(autoSaveInterval * 0.1, 10)
+        RunLoop.main.add(timer, forMode: .common)
+        autoSaveTimer = timer
     }
 
     private func autoSaveTick() {
