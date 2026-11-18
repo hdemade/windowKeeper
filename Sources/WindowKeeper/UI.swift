@@ -3,11 +3,21 @@ import Cocoa
 
 // MARK: - Fenêtre principale
 
+/// Ce que vise un renommage, une suppression ou la sélection : un ensemble d'écrans (son dernier état)
+/// ou l'une de ses sauvegardes.
+struct ConfigTarget: Hashable {
+    var key: String
+    var snapshotID: String?
+}
+
 struct MainView: View {
     @ObservedObject var model: AppDelegate
-    @State private var selectedKey: String?
+    @State private var selection: ConfigTarget?
+    @State private var expanded: Set<String> = []
     @State private var selectedSpace = 1
-    @State private var confirmDelete = false
+    @State private var pendingDelete: ConfigTarget?
+    @State private var renaming: ConfigTarget?
+    @State private var renamingInDetail = false
 
     private var layouts: [Layout] {
         // La configuration actuelle d'abord, puis les plus récentes.
@@ -17,21 +27,124 @@ struct MainView: View {
         }
     }
 
-    private var selected: Layout? {
-        let key = selectedKey ?? model.currentKey
-        return layouts.first { $0.configKey == key } ?? layouts.first
+    private func layout(for target: ConfigTarget) -> Layout? {
+        if let id = target.snapshotID { return model.store.snapshot(key: target.key, id: id) }
+        return model.store.layout(for: target.key)
+    }
+
+    /// La sélection si elle existe encore, sinon le dernier état de la configuration actuelle.
+    private var current: ConfigTarget? {
+        if let selection = selection, layout(for: selection) != nil { return selection }
+        guard let first = layouts.first(where: { $0.configKey == model.currentKey }) ?? layouts.first else { return nil }
+        return ConfigTarget(key: first.configKey)
+    }
+
+    private func label(for target: ConfigTarget) -> String {
+        guard let layout = layout(for: target) else { return "" }
+        return target.snapshotID == nil ? layout.title : layout.snapshotLabel
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if !model.trusted { permissionBanner }
             HStack(spacing: 0) {
-                sidebar.frame(width: 280)
+                sidebar.frame(width: 300)
                 Divider()
                 detail.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 860, minHeight: 540)
+        .frame(minWidth: 880, minHeight: 540)
+        .onAppear { expanded.insert(model.currentKey) }
+        .alert("Supprimer « \(pendingDelete.map(label(for:)) ?? "") » ?",
+               isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+               presenting: pendingDelete) { target in
+            Button("Supprimer", role: .destructive) {
+                if let id = target.snapshotID {
+                    model.deleteSnapshot(key: target.key, id: id)
+                } else {
+                    model.delete(key: target.key)
+                }
+                if selection == target || (target.snapshotID == nil && selection?.key == target.key) { selection = nil }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: { target in
+            Text(deleteMessage(target))
+        }
+    }
+
+    /// Le nom affiché quand l'utilisateur n'en a pas choisi.
+    private func defaultLabel(for target: ConfigTarget) -> String {
+        guard var layout = layout(for: target) else { return "" }
+        layout.name = nil
+        return target.snapshotID == nil ? layout.defaultTitle : layout.snapshotLabel
+    }
+
+    /// Champ d'édition du nom, affiché à la place du titre pendant un renommage.
+    private func nameField(for target: ConfigTarget, inDetail: Bool) -> InlineNameField? {
+        guard renaming == target, renamingInDetail == inDetail else { return nil }
+        let fallback = defaultLabel(for: target)
+        return InlineNameField(initial: layout(for: target)?.name ?? fallback,
+                               placeholder: fallback,
+                               font: inDetail ? .title2.weight(.semibold) : .body.weight(.medium),
+                               onCommit: { text in
+                                   let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                   let name = trimmed == fallback ? "" : trimmed
+                                   if let id = target.snapshotID {
+                                       model.renameSnapshot(key: target.key, id: id, to: name)
+                                   } else {
+                                       model.rename(key: target.key, to: name)
+                                   }
+                                   if renaming == target { renaming = nil }
+                               },
+                               onCancel: { if renaming == target { renaming = nil } })
+    }
+
+    private func deleteMessage(_ target: ConfigTarget) -> String {
+        if target.snapshotID != nil { return "Cette sauvegarde sera effacée. Cette action est irréversible." }
+        let count = model.store.snapshots(for: target.key).count
+        let extra = count == 0 ? "" : " ainsi que ses \(count) sauvegarde\(count > 1 ? "s" : "")"
+        return "Le dernier état enregistré pour ces écrans\(extra) sera effacé. Cette action est irréversible."
+    }
+
+    private func startRename(_ target: ConfigTarget, inDetail: Bool = false) {
+        if !inDetail { expanded.insert(target.key) }
+        selection = target
+        renamingInDetail = inDetail
+        renaming = target
+    }
+
+    /// Sauvegarde tout de suite, puis ouvre le nom de la nouvelle sauvegarde à l'édition.
+    private func startSnapshot() {
+        let key = model.currentKey
+        model.saveSnapshot(name: "") { id in
+            guard let id = id else { return }
+            let target = ConfigTarget(key: key, snapshotID: id)
+            withAnimation(.easeInOut(duration: 0.15)) { _ = expanded.insert(key) }
+            startRename(target)
+        }
+    }
+
+    private func select(_ target: ConfigTarget) {
+        selection = target
+        selectedSpace = 1
+    }
+
+    @ViewBuilder
+    private func actions(for target: ConfigTarget) -> some View {
+        if target.snapshotID == nil && target.key == model.currentKey {
+            Button { startSnapshot() } label: { Label("Nouvelle sauvegarde", systemImage: "plus") }
+                .disabled(!model.trusted || model.busy)
+        }
+        if let layout = layout(for: target), target.key == model.currentKey {
+            Button { model.restore(layout) } label: { Label("Restaurer", systemImage: "arrow.counterclockwise") }
+                .disabled(!model.trusted || model.busy)
+            Divider()
+        }
+        Button { startRename(target) } label: { Label("Renommer", systemImage: "pencil") }
+        Divider()
+        Button(role: .destructive) { pendingDelete = target } label: {
+            Label(target.snapshotID == nil ? "Supprimer la configuration…" : "Supprimer…", systemImage: "trash")
+        }
     }
 
     // MARK: Bandeau d'autorisation
@@ -66,13 +179,9 @@ struct MainView: View {
                 Spacer()
             } else {
                 ScrollView {
-                    VStack(spacing: 6) {
+                    VStack(spacing: 4) {
                         ForEach(layouts, id: \.configKey) { layout in
-                            ConfigRow(layout: layout,
-                                      isCurrent: layout.configKey == model.currentKey,
-                                      isSelected: layout.configKey == selected?.configKey)
-                                .contentShape(Rectangle())
-                                .onTapGesture { selectedKey = layout.configKey; selectedSpace = 1 }
+                            group(layout)
                         }
                     }
                     .padding(.horizontal, 10)
@@ -99,12 +208,86 @@ struct MainView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    /// Un ensemble d'écrans, dépliable pour montrer son dernier état et ses sauvegardes.
+    @ViewBuilder
+    private func group(_ layout: Layout) -> some View {
+        let key = layout.configKey
+        let snapshots = model.store.snapshots(for: key)
+        let isOpen = expanded.contains(key)
+        let groupTarget = ConfigTarget(key: key)
+        let selected = current
+
+        ConfigRow(layout: layout,
+                  nameField: nameField(for: groupTarget, inDetail: false),
+                  snapshotCount: snapshots.count,
+                  isCurrent: key == model.currentKey,
+                  isSelected: selected?.key == key && !isOpen,
+                  isExpanded: isOpen,
+                  toggle: {
+                      withAnimation(.easeInOut(duration: 0.15)) {
+                          if isOpen { expanded.remove(key) } else { expanded.insert(key) }
+                      }
+                  }) {
+            actions(for: groupTarget)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            select(groupTarget)
+            if !isOpen { withAnimation(.easeInOut(duration: 0.15)) { _ = expanded.insert(key) } }
+        }
+        .contextMenu { actions(for: groupTarget) }
+
+        if isOpen {
+            VStack(spacing: 2) {
+                SnapshotRow(icon: "clock.arrow.circlepath",
+                            title: "Dernier état",
+                            nameField: nil,
+                            subtitle: "Automatique · \(layout.windows.count) fenêtres · \(relative(layout.savedAt))",
+                            isSelected: selected == groupTarget) {
+                    actions(for: groupTarget)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { select(groupTarget) }
+                .contextMenu { actions(for: groupTarget) }
+
+                ForEach(snapshots, id: \.snapshotID) { snapshot in
+                    let target = ConfigTarget(key: key, snapshotID: snapshot.snapshotID)
+                    SnapshotRow(icon: "bookmark",
+                                title: snapshot.snapshotLabel,
+                                nameField: nameField(for: target, inDetail: false),
+                                subtitle: "\(snapshot.windows.count) fenêtres · \(relative(snapshot.savedAt))",
+                                isSelected: selected == target) {
+                        actions(for: target)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(target) }
+                    .contextMenu { actions(for: target) }
+                }
+
+                if key == model.currentKey {
+                    Button { startSnapshot() } label: {
+                        Label("Nouvelle sauvegarde", systemImage: "plus.circle")
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(.vertical, 4).padding(.horizontal, 10)
+                    .disabled(!model.trusted || model.busy)
+                }
+            }
+            .padding(.leading, 28)
+            .padding(.bottom, 4)
+        }
+    }
+
     // MARK: Détail
 
     @ViewBuilder
     private var detail: some View {
-        if let layout = selected {
-            let isCurrent = layout.configKey == model.currentKey
+        if let target = current, let layout = layout(for: target) {
+            let isCurrent = target.key == model.currentKey
+            let isSnapshot = target.snapshotID != nil
+            let groupTitle = model.store.layout(for: target.key)?.title ?? layout.title
             let spaceCount = max(layout.windows.compactMap { $0.spaceIndex }.max() ?? 1, 1)
             let space = min(selectedSpace, spaceCount)
             let visible = layout.windows.filter { $0.spaceIndex == nil || $0.spaceIndex == space }
@@ -112,8 +295,20 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(layout.title).font(.title2.weight(.semibold)).lineLimit(1)
-                        Text("\(layout.windows.count) fenêtres · sauvegardée \(relative(layout.savedAt))")
+                        HStack(spacing: 6) {
+                            if let field = nameField(for: target, inDetail: true) {
+                                field.frame(maxWidth: 420)
+                            } else {
+                                Text(isSnapshot ? layout.snapshotLabel : layout.title)
+                                    .font(.title2.weight(.semibold)).lineLimit(1)
+                                    .onTapGesture(count: 2) { startRename(target, inDetail: true) }
+                                    .help("Double-cliquez pour renommer")
+                            }
+                            Button { startRename(target, inDetail: true) } label: { Image(systemName: "pencil") }
+                                .buttonStyle(.borderless)
+                                .help(isSnapshot ? "Renommer cette sauvegarde" : "Renommer cette configuration")
+                        }
+                        Text("\(isSnapshot ? groupTitle : "Dernier état") · \(layout.windows.count) fenêtres · sauvegardée \(relative(layout.savedAt))")
                             .foregroundColor(.secondary)
                     }
                     Spacer()
@@ -135,28 +330,25 @@ struct MainView: View {
                     .frame(height: 150)
 
                 HStack {
-                    Button(role: .destructive) { confirmDelete = true } label: { Label("Supprimer", systemImage: "trash") }
+                    Button(role: .destructive) { pendingDelete = target } label: { Label("Supprimer…", systemImage: "trash") }
                     Spacer()
                     if isCurrent {
-                        Button { model.restoreCurrent() } label: { Label("Restaurer", systemImage: "arrow.counterclockwise") }
+                        Button { model.restore(layout) } label: { Label("Restaurer", systemImage: "arrow.counterclockwise") }
                             .disabled(!model.trusted || model.busy)
-                        Button { model.saveNow() } label: { Label("Sauvegarder maintenant", systemImage: "square.and.arrow.down") }
-                            .keyboardShortcut("s")
-                            .buttonStyle(.borderedProminent)
+                        Button { startSnapshot() } label: { Label("Nouvelle sauvegarde", systemImage: "plus") }
                             .disabled(!model.trusted || model.busy)
+                        if !isSnapshot {
+                            Button { model.saveNow() } label: { Label("Sauvegarder maintenant", systemImage: "square.and.arrow.down") }
+                                .keyboardShortcut("s")
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!model.trusted || model.busy)
+                        }
                     } else {
-                        Text("Sera restaurée quand ces écrans seront branchés").foregroundColor(.secondary).font(.callout)
+                        Text("Restaurable quand ces écrans seront branchés").foregroundColor(.secondary).font(.callout)
                     }
                 }
             }
             .padding(20)
-            .confirmationDialog("Supprimer cette disposition ?", isPresented: $confirmDelete) {
-                Button("Supprimer", role: .destructive) {
-                    model.delete(key: layout.configKey)
-                    selectedKey = nil
-                }
-                Button("Annuler", role: .cancel) {}
-            }
         } else {
             VStack(spacing: 14) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
@@ -180,22 +372,40 @@ struct MainView: View {
     }
 }
 
-// MARK: - Ligne de configuration
+// MARK: - Lignes de la colonne
 
-private struct ConfigRow: View {
+private struct ConfigRow<Actions: View>: View {
     let layout: Layout
+    let nameField: InlineNameField?
+    let snapshotCount: Int
     let isCurrent: Bool
     let isSelected: Bool
+    let isExpanded: Bool
+    let toggle: () -> Void
+    @ViewBuilder let actions: () -> Actions
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            Button(action: toggle) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 14, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "Replier" : "Déplier les sauvegardes")
             Image(systemName: layout.displayCount > 1 ? "display.2" : "laptopcomputer")
                 .font(.title3)
-                .frame(width: 30)
+                .frame(width: 28)
                 .foregroundColor(isSelected ? .white : .accentColor)
             VStack(alignment: .leading, spacing: 2) {
-                Text(layout.title).font(.body.weight(.medium)).lineLimit(2)
-                Text("\(layout.windows.count) fenêtres\(isCurrent ? " · actuelle" : "")")
+                if let field = nameField {
+                    field
+                } else {
+                    Text(layout.title).font(.body.weight(.medium)).lineLimit(2)
+                }
+                Text(subtitle)
                     .font(.caption)
                     .foregroundColor(isSelected ? .white.opacity(0.85) : .secondary)
             }
@@ -203,10 +413,101 @@ private struct ConfigRow: View {
             if isCurrent {
                 Circle().fill(Color.green).frame(width: 8, height: 8)
             }
+            if isSelected {
+                Menu { actions() } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Plus d'actions")
+            }
         }
-        .padding(.vertical, 8).padding(.horizontal, 10)
+        .padding(.vertical, 8).padding(.leading, 6).padding(.trailing, 10)
         .foregroundColor(isSelected ? .white : .primary)
         .background(RoundedRectangle(cornerRadius: 8).fill(isSelected ? Color.accentColor : Color.clear))
+    }
+
+    private var subtitle: String {
+        var parts = ["\(snapshotCount + 1) sauvegarde\(snapshotCount > 0 ? "s" : "")"]
+        if isCurrent { parts.append("actuelle") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct SnapshotRow<Actions: View>: View {
+    let icon: String
+    let title: String
+    let nameField: InlineNameField?
+    let subtitle: String
+    let isSelected: Bool
+    @ViewBuilder let actions: () -> Actions
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .frame(width: 18)
+                .foregroundColor(isSelected ? .white : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                if let field = nameField {
+                    field
+                } else {
+                    Text(title).font(.callout.weight(.medium)).lineLimit(1)
+                }
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(isSelected ? .white.opacity(0.85) : .secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if isSelected {
+                Menu { actions() } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Plus d'actions")
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 10)
+        .foregroundColor(isSelected ? .white : .primary)
+        .background(RoundedRectangle(cornerRadius: 7).fill(isSelected ? Color.accentColor : Color.clear))
+    }
+}
+
+// MARK: - Saisie d'un nom sur place
+
+/// Entrée valide, Échap annule, cliquer ailleurs valide aussi (comme dans le Finder).
+struct InlineNameField: View {
+    let initial: String
+    let placeholder: String
+    let font: Font
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var text = ""
+    @State private var finished = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .font(font)
+            .foregroundColor(.primary)
+            .focused($focused)
+            .onSubmit { finish(commit: true) }
+            .onExitCommand { finish(commit: false) }
+            .onChange(of: focused) { isFocused in
+                if !isFocused { finish(commit: true) }
+            }
+            .onAppear {
+                finished = false
+                text = initial
+                DispatchQueue.main.async { focused = true }
+            }
+    }
+
+    private func finish(commit: Bool) {
+        guard !finished else { return }
+        finished = true
+        if commit { onCommit(text) } else { onCancel() }
     }
 }
 
