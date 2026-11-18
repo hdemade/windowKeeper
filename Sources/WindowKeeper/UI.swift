@@ -47,6 +47,7 @@ struct MainView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !model.trusted { permissionBanner }
+            if let release = model.updater.available { updateBanner(release) }
             HStack(spacing: 0) {
                 sidebar.frame(width: 300)
                 Divider()
@@ -164,6 +165,25 @@ struct MainView: View {
         .background(Color.orange.opacity(0.12))
     }
 
+    // MARK: Bandeau de mise à jour
+
+    private func updateBanner(_ release: UpdateChecker.Release) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill").foregroundColor(.accentColor).font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("WindowKeeper \(release.version) est disponible").font(.headline)
+                Text("Vous utilisez la version \(model.updater.currentVersion).")
+                    .font(.subheadline).foregroundColor(.secondary)
+            }
+            Spacer()
+            Button("Notes de version") { NSWorkspace.shared.open(release.pageURL) }
+            Button("Télécharger") { model.updater.download(release) }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(14)
+        .background(Color.accentColor.opacity(0.10))
+    }
+
     // MARK: Colonne de gauche
 
     private var sidebar: some View {
@@ -189,21 +209,20 @@ struct MainView: View {
             }
 
             Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                // Libellé étiré : les interrupteurs restent alignés à droite, même si un libellé passe sur deux lignes.
-                Toggle(isOn: Binding(get: { model.autoSave }, set: { model.autoSave = $0 })) {
-                    Text("Sauvegarde automatique").frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.autoSave ? "Sauvegarde auto toutes les \(AutoSaveInterval.label(model.autoSaveInterval))"
+                                        : "Sauvegarde auto désactivée")
+                    Text(model.autoRestore ? "Restauration auto activée" : "Restauration auto désactivée")
                 }
-                Toggle(isOn: Binding(get: { model.autoRestore }, set: { model.autoRestore = $0 })) {
-                    Text("Restauration au changement d'écrans").frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Toggle(isOn: Binding(get: { model.loginItemEnabled }, set: { _ in model.toggleLoginItem() })) {
-                    Text("Lancer à l'ouverture de session").frame(maxWidth: .infinity, alignment: .leading)
-                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+                Spacer(minLength: 0)
+                Button { model.showSettings() } label: { Label("Réglages…", systemImage: "gearshape") }
+                    .keyboardShortcut(",", modifiers: .command)
+                    .help("Ouvrir les réglages (⌘,)")
             }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .padding(16)
+            .padding(.horizontal, 16).padding(.vertical, 12)
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
